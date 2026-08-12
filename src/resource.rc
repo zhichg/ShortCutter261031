@@ -1,0 +1,38 @@
+#include <windows.h>
+#include "resource.h"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "ShortCutter.manifest"
+
+/* Keep application resources explicit: test icons in the project root must
+   never shadow ShortCutter's own icons during a root-level build. */
+IDI_APP      ICON "src/app.ico"
+IDI_APP_GRAY ICON "src/app_gray.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     3,0,0,0
+PRODUCTVERSION  3,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "ShortCutter"
+            VALUE "FileDescription",  "Mouse Gesture Tool"
+            VALUE "FileVersion",      "3.0"
+            VALUE "InternalName",     "ShortCutter"
+            VALUE "LegalCopyright",   ""
+            VALUE "OriginalFilename", "ShortCutter.exe"
+            VALUE "ProductName",      "ShortCutter"
+            VALUE "ProductVersion",   "3.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 0x04B0
+    END
+END

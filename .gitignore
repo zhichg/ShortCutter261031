@@ -1,0 +1,16 @@
+# Runtime and local configuration
+ShortCutter.ini
+*.log
+*.tmp
+*.temp
+*.bak
+*.dmp
+.env
+.env.*
+
+# Build outputs
+ShortCutter.exe
+*.o
+*.obj
+*.pdb
+*.ilk
