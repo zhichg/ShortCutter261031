@@ -1,4 +1,4 @@
-# Runtime and local configuration
+# Runtime / personal files
 ShortCutter.ini
 *.log
 *.tmp
@@ -7,10 +7,16 @@ ShortCutter.ini
 *.dmp
 .env
 .env.*
-
-# Build outputs
-ShortCutter.exe
+# Build and test output
+*.exe
 *.o
 *.obj
 *.pdb
 *.ilk
+tests/.output/
+tests/*-fixture/
+design-review/
+__pycache__/
+
+*.ini
+/tests/*.bmp

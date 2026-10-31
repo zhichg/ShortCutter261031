@@ -1,4 +1,5 @@
 #include "main.h"
+#include <stdlib.h>
 
 /* ── 状态机 ───────────────────────────────── */
 static HHOOK  g_hMouseHook  = NULL;
@@ -7,7 +8,63 @@ static int    g_isGesture   = 0; /* 是否已判定为手势（非普通点击�
 static POINT  g_points[1000];
 static int    g_pointCount;
 static int    g_downMods    = 0; /* 鼠标按下时的修饰键 */
-char          g_pendChain[64];   /* 异步匹配用：钩子写→主线程读 */
+/* Each posted event owns its input snapshot; later gestures cannot replace it. */
+typedef struct {
+    char chain[64];
+    int chainLen, modifier, zone, mouseButton;
+} GestureEvent;
+
+static void Gesture_PostEvent(const char *chain, int length, int modifier, int zone)
+{
+    GestureEvent *event = calloc(1, sizeof(*event));
+    if (!event) return;
+    if (chain && length > 0 && length < 64) {
+        memcpy(event->chain, chain, length);
+        event->chainLen = length;
+    }
+    event->modifier = modifier;
+    event->zone = zone;
+    event->mouseButton = g_cfg.mouseButton;
+    if (!PostMessageW(g_hWnd, WM_SC_MATCH, event->chainLen != 0, (LPARAM)event)) free(event);
+}
+
+void Gesture_HandleMatch(WPARAM type, LPARAM payload)
+{
+    (void)type;
+    GestureEvent *owned = (GestureEvent*)payload;
+    if (!owned) return;
+    GestureEvent event = *owned;
+    free(owned);
+    if (!g_enabled) return;
+    if (event.chainLen == 0) {
+        INPUT input[2] = {0};
+        input[0].type = input[1].type = INPUT_MOUSE;
+        input[0].mi.dwFlags = event.mouseButton == 2 ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_RIGHTDOWN;
+        input[1].mi.dwFlags = event.mouseButton == 2 ? MOUSEEVENTF_MIDDLEUP : MOUSEEVENTF_RIGHTUP;
+        SendInput(2, input, sizeof(INPUT));
+    } else {
+        int match = Gesture_Match(event.chain, event.chainLen, event.modifier, event.zone);
+        if (match >= 0) Action_ExecuteCustom(&g_cfg.gestures[match]);
+    }
+}
+
+void Gesture_DiscardPendingEvents(void)
+{
+    MSG message;
+    while (PeekMessageW(&message, g_hWnd, WM_SC_MATCH, WM_SC_MATCH, PM_REMOVE)) free((void*)message.lParam);
+}
+
+static int Gesture_Modifiers(void)
+{
+    int mods = 0;
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= SC_MOD_CTRL;
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) mods |= SC_MOD_SHIFT;
+    if (GetAsyncKeyState(VK_MENU) & 0x8000) mods |= SC_MOD_ALT;
+    if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) mods |= SC_MOD_WIN;
+    return mods;
+}
+
+int Gesture_IsActive(void) { return g_state != 0; }
 
 /* ── 方向量化 ──────────────────────────────── */
 static int Gesture_QuantizeDir(int dx, int dy, int threshold)
@@ -30,7 +87,7 @@ static int Gesture_QuantizeDir(int dx, int dy, int threshold)
 int Gesture_Downsample(const POINT *src, int srcCount,
                        POINT *dst, int dstMax, int minDist)
 {
-    if (srcCount < 2 || minDist <= 0) return 0;
+    if (!src || !dst || srcCount < 2 || dstMax < 1 || minDist <= 0) return 0;
     int dc = 0;
     dst[dc++] = src[0];
     int minDistSq = minDist * minDist;
@@ -53,7 +110,9 @@ int Gesture_Downsample(const POINT *src, int srcCount,
 int Gesture_EncodeChain(const POINT *pts, int count,
                         char *chain, int chainMax)
 {
-    if (count < 2) return 0;
+    if (!chain || chainMax < 1) return 0;
+    chain[0] = '\0';
+    if (!pts || count < 2) return 0;
     int cl = 0, lastDir = DIR_NONE;
     for (int i = 1; i < count && cl < chainMax; i++) {
         int dx = pts[i].x - pts[i - 1].x;
@@ -71,7 +130,7 @@ int Gesture_EncodeChain(const POINT *pts, int count,
 /* ── LCS 匹配 ──────────────────────────────── */
 static int ChainSimilarity(const char *a, int aLen, const char *b, int bLen)
 {
-    if (aLen == 0 || bLen == 0) return 0;
+    if (aLen <= 0 || bLen <= 0 || aLen > 63 || bLen > 63) return 0;
     short dp[65][65];
     for (int i = 0; i <= aLen; i++) dp[i][0] = 0;
     for (int j = 0; j <= bLen; j++) dp[0][j] = 0;
@@ -103,16 +162,17 @@ int Gesture_GetZone(int x, int y, int screenW, int screenH)
 /* ── 公有：匹配手势 → 返回索引或 -1 ──────────── */
 int Gesture_Match(const char *chain, int chainLen, int modifier, int zone)
 {
+    if (zone < ZONE_MAIN || zone >= ZONE_ALL) return -1;
     int bestIdx = -1, bestScore = 0;
-    int bestZone = -1; /* 追踪最佳匹配的 zone：精确匹配 > Main fallback */
+    int bestZone = -1; /* Equal scores prefer the starting zone over All areas. */
 
     for (int i = 0; i < g_cfg.gestureCount; i++) {
         GestureDef *g = &g_cfg.gestures[i];
         if (!g->enabled) continue;
         if (g->modifier != modifier) continue;
 
-        /* Zone 过滤：只匹配 zone 相同 或 zone=Main(0) */
-        if (g->zone != zone && g->zone != ZONE_MAIN) continue;
+        /* Only an explicit All areas binding may match a different zone. */
+        if (g->zone != zone && g->zone != ZONE_ALL) continue;
 
         for (int s = 0; s < g->chainCount; s++) {
             int tLen = (int)strlen(g->chains[s]);
@@ -122,8 +182,8 @@ int Gesture_Match(const char *chain, int chainLen, int modifier, int zone)
                 bestIdx = i;
                 bestZone = g->zone;
             } else if (score >= g_cfg.matchThreshold && score == bestScore) {
-                /* 同分时：精确 zone 匹配优先于 Main fallback */
-                if (bestZone == ZONE_MAIN && g->zone == zone) {
+                /* 同分时：精确区域匹配优先于全部区域。 */
+                if (bestZone == ZONE_ALL && g->zone == zone) {
                     bestIdx = i;
                     bestZone = g->zone;
                 }
@@ -150,28 +210,18 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp)
     if (ms->flags & LLMHF_INJECTED)
         return CallNextHookEx(NULL, nCode, wp, lp);
 
-    if (!g_enabled)
-        return CallNextHookEx(NULL, nCode, wp, lp);
+    /* Pointer drift after a gesture is not a new command. Only deliberate
+       button presses and scrolling cancel pending application activation. */
+    if (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN ||
+        wp == WM_XBUTTONDOWN || wp == WM_MOUSEWHEEL || wp == WM_MOUSEHWHEEL) Action_NoteUserInput();
 
-    /* Input 弹窗可见时：点击框外直接关闭 */
-    if ((wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN) &&
-        Popup_CloseIfOutside(ms->pt.x, ms->pt.y))
-        return CallNextHookEx(NULL, nCode, wp, lp);
+    if((wp==WM_LBUTTONDOWN || wp==WM_RBUTTONDOWN || wp==WM_MBUTTONDOWN || wp==WM_XBUTTONDOWN) &&
+       Dashboard_HandleOutsideClick(ms->pt))
+        return CallNextHookEx(NULL,nCode,wp,lp);
 
-    /* 仪表盘可见时：点击框外直接关闭 */
-    if ((wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN)) {
-        if (Dashboard_IsVisible()) {
-            RECT r;
-            HWND hDash = NULL;
-            /* Dashboard 标题可自定义，按窗口类定位以确保首个外部点击也能关闭。 */
-            hDash = FindWindowW(L"SC_Dashboard", NULL);
-            if (hDash && GetWindowRect(hDash, &r)) {
-                if (ms->pt.x < r.left || ms->pt.x > r.right ||
-                    ms->pt.y < r.top  || ms->pt.y > r.bottom) {
-                    Dashboard_Close();
-                }
-            }
-        }
+    if (!g_enabled || UI_IsCapturingInput()) {
+        if (g_state) Gesture_Cancel();
+        return CallNextHookEx(NULL, nCode, wp, lp);
     }
 
     UINT downMsg, upMsg;
@@ -187,11 +237,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp)
         g_pointCount = 0;
         g_points[g_pointCount++] = ms->pt;
         /* 追踪整个手势期间的修饰键（任意时间按住都算） */
-        g_downMods = 0;
-        if (GetKeyState(VK_CONTROL) & 0x8000) g_downMods |= SC_MOD_CTRL;
-        if (GetKeyState(VK_SHIFT)   & 0x8000) g_downMods |= SC_MOD_SHIFT;
-        if (GetKeyState(VK_MENU)    & 0x8000) g_downMods |= SC_MOD_ALT;
-        if (GetKeyState(VK_LWIN)    & 0x8000) g_downMods |= SC_MOD_WIN;
+        g_downMods = Gesture_Modifiers();
         Trail_Show();
         return 1; /* 吃掉按下事件，防止右键菜单等干扰 */
     }
@@ -199,12 +245,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp)
     if (g_state == 1) {
         if (wp == WM_MOUSEMOVE) {
             /* 累积修饰键（任意时间按下都算） */
-            int cm = 0;
-            if (GetKeyState(VK_CONTROL) & 0x8000) cm |= SC_MOD_CTRL;
-            if (GetKeyState(VK_SHIFT)   & 0x8000) cm |= SC_MOD_SHIFT;
-            if (GetKeyState(VK_MENU)    & 0x8000) cm |= SC_MOD_ALT;
-            if (GetKeyState(VK_LWIN)    & 0x8000) cm |= SC_MOD_WIN;
-            g_downMods |= cm;
+            g_downMods |= Gesture_Modifiers();
             /* 记录路径点（间距采样） */
             if (g_pointCount < 1000) {
                 int dx = ms->pt.x - g_points[g_pointCount - 1].x;
@@ -227,7 +268,7 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp)
             if (!g_isGesture) {
                 /* 普通点击（未拖动），异步合成正常点击 */
                 g_pointCount = 0;
-                PostMessageW(g_hWnd, WM_SC_MATCH, 0, (LPARAM)(g_cfg.mouseButton << 24));
+                Gesture_PostEvent(NULL, 0, 0, 0);
                 return 1;
             }
 
@@ -260,19 +301,13 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp)
                     int chainLen = Gesture_EncodeChain(ds, dsCnt, chain, 63);
                     if (chainLen >= 1) {
                         /* 累积整个手势期间的修饰键（按下+移动+松开都算） */
-                        int mod = g_downMods;
-                        if (GetKeyState(VK_CONTROL) & 0x8000) mod |= SC_MOD_CTRL;
-                        if (GetKeyState(VK_SHIFT)   & 0x8000) mod |= SC_MOD_SHIFT;
-                        if (GetKeyState(VK_MENU)    & 0x8000) mod |= SC_MOD_ALT;
-                        if (GetKeyState(VK_LWIN)    & 0x8000) mod |= SC_MOD_WIN;
-                        for (int ci = 0; ci < chainLen; ci++) g_pendChain[ci] = chain[ci];
-                        g_pendChain[chainLen] = 0;
+                        int mod = g_downMods | Gesture_Modifiers();
                         /* 计算手势起点区域 */
-                        int zone = Gesture_GetZone(g_points[0].x, g_points[0].y,
+                        int zone = Gesture_GetZone(g_points[0].x - GetSystemMetrics(SM_XVIRTUALSCREEN),
+                            g_points[0].y - GetSystemMetrics(SM_YVIRTUALSCREEN),
                             GetSystemMetrics(SM_CXVIRTUALSCREEN),
                             GetSystemMetrics(SM_CYVIRTUALSCREEN));
-                        LPARAM l = (LPARAM)(((mod & 0xFF) << 16) | ((zone & 0xFF) << 8) | (UINT)(g_cfg.mouseButton << 24));
-                        PostMessageW(g_hWnd, WM_SC_MATCH, (WPARAM)chainLen, l);
+                        Gesture_PostEvent(chain, chainLen, mod, zone);
                         g_pointCount = 0;
                         return 1; /* 吞掉原始释放事件 */
                     }
@@ -351,6 +386,16 @@ static LRESULT CALLBACK TrailWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 static void Trail_Show(void)
 {
     if (!g_cfg.trailEnabled) return;
+    RECT virtualScreen = {GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0};
+    virtualScreen.right = virtualScreen.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    virtualScreen.bottom = virtualScreen.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (g_hTrailWnd) {
+        RECT previous;
+        if (!GetWindowRect(g_hTrailWnd, &previous) || !EqualRect(&virtualScreen, &previous)) {
+            DestroyWindow(g_hTrailWnd);
+            g_hTrailWnd = NULL;
+        }
+    }
     if (!g_hTrailWnd) {
         WNDCLASSEXW wc = {0};
         wc.cbSize = sizeof(wc); wc.lpfnWndProc = TrailWndProc;
@@ -390,9 +435,7 @@ static void Trail_Update(int x, int y)
     }
     /* 异步绘制：避免钩子回调中同步阻塞，防止 Windows 因超时静默移除钩子 */
     InvalidateRect(g_hTrailWnd, NULL, FALSE);
-    /* 刷新 TOPMOST Z-order：对抗任务管理器等系统窗口的同级 TOPMOST 竞争 */
-    SetWindowPos(g_hTrailWnd, HWND_TOPMOST, 0, 0, 0, 0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    /* Z-order is established when the gesture starts, not on every sample. */
 }
 
 static void Trail_Hide(void)
@@ -407,10 +450,29 @@ void Gesture_Start(void)
     if (g_hMouseHook) return;
     g_hMouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc,
                                      GetModuleHandleW(NULL), 0);
+    if (!g_hMouseHook) SC_ReportError(SC_Text(L"Mouse input listener", L"鼠标输入监听"), GetLastError());
+}
+
+int Gesture_GetHookStatus(void) { return g_hMouseHook != NULL; }
+
+void Gesture_Cancel(void)
+{
+    g_state = g_isGesture = g_pointCount = g_downMods = 0;
+    Trail_Hide();
+}
+
+void Gesture_OnDisplayChange(void)
+{
+    Gesture_Cancel();
+    if (g_hTrailWnd) {
+        DestroyWindow(g_hTrailWnd);
+        g_hTrailWnd = NULL;
+    }
 }
 
 void Gesture_Stop(void)
 {
+    Gesture_Cancel();
     if (g_hMouseHook) {
         UnhookWindowsHookEx(g_hMouseHook);
         g_hMouseHook = NULL;

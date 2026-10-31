@@ -9,8 +9,8 @@ IDI_APP      ICON "src/app.ico"
 IDI_APP_GRAY ICON "src/app_gray.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     3,0,0,0
-PRODUCTVERSION  3,0,0,0
+FILEVERSION     4,1,0,0
+PRODUCTVERSION  4,1,0,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -22,13 +22,13 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName",      "ShortCutter"
-            VALUE "FileDescription",  "Mouse Gesture Tool"
-            VALUE "FileVersion",      "3.0"
+            VALUE "FileDescription",  "ShortCutter Dashboard and Mouse Gestures"
+            VALUE "FileVersion",      "4.1.0"
             VALUE "InternalName",     "ShortCutter"
             VALUE "LegalCopyright",   ""
             VALUE "OriginalFilename", "ShortCutter.exe"
             VALUE "ProductName",      "ShortCutter"
-            VALUE "ProductVersion",   "3.0"
+            VALUE "ProductVersion",   "4.1.0"
         END
     END
     BLOCK "VarFileInfo"
